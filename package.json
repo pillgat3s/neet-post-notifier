@@ -1,0 +1,15 @@
+{
+	"name": "neet-post-notifier",
+	"version": "1.0.0",
+	"private": true,
+	"description": "Telegram bot that mirrors new X posts from @neet_sol into groups via Nitter RSS (no X API), running on Cloudflare Workers",
+	"scripts": {
+		"dev": "wrangler dev --test-scheduled",
+		"deploy": "wrangler deploy",
+		"types": "wrangler types"
+	},
+	"devDependencies": {
+		"typescript": "^5.5.0",
+		"wrangler": "^4.0.0"
+	}
+}

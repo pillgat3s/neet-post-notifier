@@ -1,0 +1,23 @@
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "neet-post-notifier",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-06-01",
+	"triggers": {
+		// poll the feed every 2 minutes
+		"crons": ["*/2 * * * *"]
+	},
+	"kv_namespaces": [
+		{ "binding": "STATE", "id": "9e70c1f0b6b4429da6df2071394c138c" }
+	],
+	"vars": {
+		"X_HANDLE": "neet_sol",
+		// comma-separated, tried in order until one works
+		"NITTER_INSTANCES": "https://nitter.net",
+		"INCLUDE_RETWEETS": "0",
+		"INCLUDE_REPLIES": "0"
+	},
+	"observability": {
+		"enabled": true
+	}
+}
