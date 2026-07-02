@@ -17,7 +17,7 @@
 interface Env {
 	STATE: KVNamespace;
 	TELEGRAM_BOT_TOKEN: string;
-	X_HANDLE: string;
+	X_HANDLES: string;
 	INCLUDE_RETWEETS: string;
 	INCLUDE_REPLIES: string;
 }
@@ -31,6 +31,10 @@ interface Post {
 }
 
 type Chats = Record<string, string>; // chat_id -> title
+
+function handles(env: Env): string[] {
+	return env.X_HANDLES.split(',').map((h) => h.trim().replace(/^@/, '')).filter(Boolean);
+}
 
 // ---------- Telegram API ----------
 
@@ -132,20 +136,21 @@ async function broadcastPost(env: Env, url: string): Promise<void> {
 
 // ---------- Feed processing ----------
 
-async function processFeed(env: Env, xml: string): Promise<{ parsed: number; fresh: number }> {
-	const all = parseRss(xml, env.X_HANDLE);
+async function processFeed(env: Env, xml: string, handle: string): Promise<{ parsed: number; fresh: number }> {
+	const all = parseRss(xml, handle);
 	const posts = all.filter(
 		(p) => (env.INCLUDE_RETWEETS === '1' || !p.isRetweet) && (env.INCLUDE_REPLIES === '1' || !p.isReply),
 	);
 	if (!posts.length) return { parsed: all.length, fresh: 0 };
 
-	const lastSeenRaw = await env.STATE.get('last_seen_id');
+	const stateKey = `last_seen:${handle}`;
+	const lastSeenRaw = await env.STATE.get(stateKey);
 	const newest = posts.reduce((a, b) => (a.id > b.id ? a : b));
 
 	if (lastSeenRaw === null) {
-		// first run: mark current feed as seen instead of spamming the backlog
-		await env.STATE.put('last_seen_id', newest.id.toString());
-		console.log(`Initialized last_seen_id=${newest.id}`);
+		// first run for this handle: mark current feed as seen instead of spamming the backlog
+		await env.STATE.put(stateKey, newest.id.toString());
+		console.log(`Initialized ${stateKey}=${newest.id}`);
 		return { parsed: all.length, fresh: 0 };
 	}
 
@@ -153,9 +158,9 @@ async function processFeed(env: Env, xml: string): Promise<{ parsed: number; fre
 	const fresh = posts.filter((p) => p.id > lastSeen).sort((a, b) => (a.id < b.id ? -1 : 1));
 
 	for (const post of fresh) {
-		console.log(`New post ${post.id}: ${post.title.slice(0, 80)}`);
+		console.log(`New post by @${handle} ${post.id}: ${post.title.slice(0, 80)}`);
 		await broadcastPost(env, post.url);
-		await env.STATE.put('last_seen_id', post.id.toString());
+		await env.STATE.put(stateKey, post.id.toString());
 	}
 	return { parsed: all.length, fresh: fresh.length };
 }
@@ -202,15 +207,18 @@ async function handleUpdate(env: Env, update: any): Promise<void> {
 		await tg(env, 'sendMessage', {
 			chat_id: msg.chat.id,
 			text:
-				`Add me to a group and I'll post every new X post from @${env.X_HANDLE} there. ` +
+				`Add me to a group and I'll post every new X post from ${handles(env).map((h) => '@' + h).join(', ')} there. ` +
 				`Make me an admin with 'Pin messages' rights and I'll also pin each link (silently).`,
 		});
 	} else if (text.startsWith('/status')) {
 		const chats = await getChats(env);
-		const lastSeen = await env.STATE.get('last_seen_id');
+		const parts: string[] = [];
+		for (const h of handles(env)) {
+			parts.push(`@${h}: ${(await env.STATE.get(`last_seen:${h}`)) ?? 'none yet'}`);
+		}
 		await tg(env, 'sendMessage', {
 			chat_id: msg.chat.id,
-			text: `Watching @${env.X_HANDLE} · ${Object.keys(chats).length} chat(s) registered · last seen post ID ${lastSeen ?? 'none yet'}`,
+			text: `${Object.keys(chats).length} chat(s) registered · last seen — ${parts.join(' · ')}`,
 		});
 	}
 }
@@ -232,11 +240,15 @@ export default {
 			if (request.headers.get('x-ingest-key') !== (await webhookSecret(env))) {
 				return new Response('forbidden', { status: 403 });
 			}
+			const handle = (url.searchParams.get('handle') ?? '').replace(/^@/, '');
+			if (!handles(env).includes(handle)) {
+				return Response.json({ error: `unknown handle: ${handle}` }, { status: 400 });
+			}
 			const xml = await request.text();
 			if (!xml.slice(0, 500).includes('<rss')) {
 				return Response.json({ error: 'body is not RSS' }, { status: 400 });
 			}
-			const stats = await processFeed(env, xml);
+			const stats = await processFeed(env, xml, handle);
 			return Response.json(stats);
 		}
 

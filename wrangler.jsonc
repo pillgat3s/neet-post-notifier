@@ -7,7 +7,7 @@
 		{ "binding": "STATE", "id": "9e70c1f0b6b4429da6df2071394c138c" }
 	],
 	"vars": {
-		"X_HANDLE": "neet_sol",
+		"X_HANDLES": "neet_sol,pillg4tes",
 		"INCLUDE_RETWEETS": "0",
 		"INCLUDE_REPLIES": "0"
 	},
