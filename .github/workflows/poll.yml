@@ -1,0 +1,33 @@
+name: poll-feed
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Fetch Nitter RSS and push to Worker
+        env:
+          INGEST_KEY: ${{ secrets.INGEST_KEY }}
+        run: |
+          set -u
+          HANDLE="neet_sol"
+          for base in "https://nitter.net" "https://nitter.tiekoetter.com"; do
+            echo "trying $base"
+            code=$(curl -s -m 20 -A "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0" \
+              -o feed.xml -w "%{http_code}" "$base/$HANDLE/rss" || echo "000")
+            if [ "$code" = "200" ] && head -c 500 feed.xml | grep -q "<rss"; then
+              echo "got feed from $base"
+              curl -s -m 30 -X POST "https://neet-post-notifier.pillgates777.workers.dev/ingest" \
+                -H "x-ingest-key: $INGEST_KEY" \
+                --data-binary @feed.xml
+              echo
+              exit 0
+            fi
+            echo "$base failed (HTTP $code)"
+          done
+          echo "all instances failed" >&2
+          exit 1

@@ -3,18 +3,21 @@
  *
  * Mirrors every new X post from one account (default @neet_sol) into every
  * Telegram group the bot has been added to, silently pinning the link where
- * it has the rights. Posts are fetched via Nitter RSS — no X API needed.
+ * it has the rights. Posts come in via Nitter RSS — no X API needed.
  *
- * - scheduled(): cron poll of the RSS feed, diffed against KV state
- * - fetch(): Telegram webhook (group add/remove, /start, /status) and
- *   GET /init to (re)register the webhook after deploying
+ * Nitter instances block requests from Cloudflare's network, so the feed is
+ * fetched by a scheduled GitHub Action (.github/workflows/poll.yml) that
+ * POSTs the raw RSS XML to /ingest. The Worker parses it, diffs against KV
+ * state, and broadcasts new posts.
+ *
+ * fetch() also serves the Telegram webhook (group add/remove, /start,
+ * /status) and GET /init to (re)register the webhook after deploying.
  */
 
 interface Env {
 	STATE: KVNamespace;
 	TELEGRAM_BOT_TOKEN: string;
 	X_HANDLE: string;
-	NITTER_INSTANCES: string;
 	INCLUDE_RETWEETS: string;
 	INCLUDE_REPLIES: string;
 }
@@ -29,9 +32,6 @@ interface Post {
 
 type Chats = Record<string, string>; // chat_id -> title
 
-const USER_AGENT =
-	'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
-
 // ---------- Telegram API ----------
 
 async function tg(env: Env, method: string, payload: unknown): Promise<any> {
@@ -43,13 +43,13 @@ async function tg(env: Env, method: string, payload: unknown): Promise<any> {
 	return res.json();
 }
 
-/** Webhook secret derived from the bot token, so there's only one secret to manage. */
+/** Shared secret derived from the bot token: used for the Telegram webhook and /ingest auth. */
 async function webhookSecret(env: Env): Promise<string> {
 	const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(env.TELEGRAM_BOT_TOKEN));
 	return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
 }
 
-// ---------- Feed fetching (Nitter RSS) ----------
+// ---------- RSS parsing ----------
 
 function decodeEntities(s: string): string {
 	return s
@@ -76,33 +76,6 @@ function parseRss(xml: string, handle: string): Post[] {
 		});
 	}
 	return posts;
-}
-
-/** Try each Nitter instance until one returns a parseable, non-empty feed. */
-async function fetchPosts(env: Env): Promise<Post[] | null> {
-	const instances = env.NITTER_INSTANCES.split(',').map((u) => u.trim().replace(/\/$/, '')).filter(Boolean);
-	for (const base of instances) {
-		try {
-			const res = await fetch(`${base}/${env.X_HANDLE}/rss`, {
-				headers: { 'User-Agent': USER_AGENT },
-			});
-			if (!res.ok) {
-				console.warn(`Instance ${base} returned HTTP ${res.status}`);
-				continue;
-			}
-			const text = await res.text();
-			if (!text.slice(0, 500).includes('<rss')) {
-				console.warn(`Instance ${base} did not return RSS`);
-				continue;
-			}
-			const posts = parseRss(text, env.X_HANDLE);
-			if (posts.length) return posts;
-			console.warn(`Instance ${base} returned an empty feed`);
-		} catch (e) {
-			console.warn(`Instance ${base} failed: ${e}`);
-		}
-	}
-	return null;
 }
 
 // ---------- State (KV) ----------
@@ -157,24 +130,14 @@ async function broadcastPost(env: Env, url: string): Promise<void> {
 	if (chatsChanged) await saveChats(env, chats);
 }
 
-// ---------- Cron ----------
+// ---------- Feed processing ----------
 
-async function pollFeed(env: Env): Promise<void> {
-	if (!env.TELEGRAM_BOT_TOKEN) {
-		console.error('TELEGRAM_BOT_TOKEN secret is not set yet');
-		return;
-	}
-
-	const all = await fetchPosts(env);
-	if (all === null) {
-		console.warn('All Nitter instances failed this round, will retry next cron');
-		return;
-	}
-
+async function processFeed(env: Env, xml: string): Promise<{ parsed: number; fresh: number }> {
+	const all = parseRss(xml, env.X_HANDLE);
 	const posts = all.filter(
 		(p) => (env.INCLUDE_RETWEETS === '1' || !p.isRetweet) && (env.INCLUDE_REPLIES === '1' || !p.isReply),
 	);
-	if (!posts.length) return;
+	if (!posts.length) return { parsed: all.length, fresh: 0 };
 
 	const lastSeenRaw = await env.STATE.get('last_seen_id');
 	const newest = posts.reduce((a, b) => (a.id > b.id ? a : b));
@@ -183,7 +146,7 @@ async function pollFeed(env: Env): Promise<void> {
 		// first run: mark current feed as seen instead of spamming the backlog
 		await env.STATE.put('last_seen_id', newest.id.toString());
 		console.log(`Initialized last_seen_id=${newest.id}`);
-		return;
+		return { parsed: all.length, fresh: 0 };
 	}
 
 	const lastSeen = BigInt(lastSeenRaw);
@@ -194,6 +157,7 @@ async function pollFeed(env: Env): Promise<void> {
 		await broadcastPost(env, post.url);
 		await env.STATE.put('last_seen_id', post.id.toString());
 	}
+	return { parsed: all.length, fresh: fresh.length };
 }
 
 // ---------- Webhook ----------
@@ -263,6 +227,19 @@ export default {
 			return new Response('ok');
 		}
 
+		// Feed drop-off from the GitHub Action: raw Nitter RSS XML in the body.
+		if (url.pathname === '/ingest' && request.method === 'POST') {
+			if (request.headers.get('x-ingest-key') !== (await webhookSecret(env))) {
+				return new Response('forbidden', { status: 403 });
+			}
+			const xml = await request.text();
+			if (!xml.slice(0, 500).includes('<rss')) {
+				return Response.json({ error: 'body is not RSS' }, { status: 400 });
+			}
+			const stats = await processFeed(env, xml);
+			return Response.json(stats);
+		}
+
 		// One-time setup after deploying + setting the token secret:
 		// visiting /init registers this Worker as the bot's webhook. Idempotent.
 		if (url.pathname === '/init') {
@@ -277,44 +254,6 @@ export default {
 			return Response.json(result);
 		}
 
-		// Temporary: KV write/read self-test. Guarded by the webhook secret.
-		if (url.pathname === '/debug/kv') {
-			if (url.searchParams.get('key') !== (await webhookSecret(env))) {
-				return new Response('forbidden', { status: 403 });
-			}
-			try {
-				await env.STATE.put('kv_selftest', 'hello');
-				const back = await env.STATE.get('kv_selftest');
-				return Response.json({ wrote: true, readBack: back });
-			} catch (e) {
-				return Response.json({ error: String(e) });
-			}
-		}
-
-		// Temporary: probe feed sources from the Workers network. Guarded by the webhook secret.
-		if (url.pathname === '/debug/fetch') {
-			if (url.searchParams.get('key') !== (await webhookSecret(env))) {
-				return new Response('forbidden', { status: 403 });
-			}
-			const target = url.searchParams.get('url') ?? '';
-			try {
-				const res = await fetch(target, {
-					headers: {
-						'User-Agent': url.searchParams.get('ua') ?? USER_AGENT,
-						Accept: url.searchParams.get('accept') ?? '*/*',
-					},
-				});
-				const body = await res.text();
-				return Response.json({ status: res.status, length: body.length, head: body.slice(0, 400) });
-			} catch (e) {
-				return Response.json({ error: String(e) });
-			}
-		}
-
 		return new Response('neet-post-notifier is running');
-	},
-
-	async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-		ctx.waitUntil(pollFeed(env));
 	},
 } satisfies ExportedHandler<Env>;

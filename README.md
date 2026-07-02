@@ -9,8 +9,11 @@ so there is **no X API key and no hosting cost**.
 
 ## How it works
 
-- A cron trigger (`*/2 * * * *`) polls `https://nitter.net/neet_sol/rss`
-  (fallback instances configurable via `NITTER_INSTANCES`).
+- Nitter instances block requests from Cloudflare's network, so a scheduled
+  **GitHub Action** ([.github/workflows/poll.yml](.github/workflows/poll.yml),
+  every 5 minutes, free on public repos) fetches the RSS and POSTs the raw XML
+  to the Worker's `/ingest` endpoint (authenticated via the `INGEST_KEY`
+  repo secret = first 32 hex chars of SHA-256 of the bot token).
 - Group membership and the last-seen post ID are stored in Workers KV.
 - A Telegram webhook (`POST /webhook`, authenticated with a secret token
   derived from the bot token) tracks the bot being added to / removed from groups.
@@ -34,6 +37,12 @@ Then visit `https://<your-worker>.workers.dev/init` once — this registers the
 Worker as the bot's Telegram webhook. It's idempotent; re-run it after
 changing the token.
 
+Finally set the GitHub Actions secret that authenticates the feed poller:
+
+```bash
+printf '%s' '<bot token>' | shasum -a 256 | cut -c1-32 | tr -d '\n' | gh secret set INGEST_KEY
+```
+
 ### Bot setup
 
 1. Create a bot with [@BotFather](https://t.me/BotFather), copy the token.
@@ -49,7 +58,10 @@ changing the token.
 
 ## Notes
 
-- Nitter instances come and go. If `nitter.net` dies, add working mirrors to
-  `NITTER_INSTANCES` in `wrangler.jsonc` (comma-separated, tried in order) and
-  redeploy — status of public instances: https://status.d420.de/
-- Debug with `npx wrangler tail` (cron runs log every poll).
+- Nitter instances come and go. If `nitter.net` dies, swap in working mirrors
+  in the instance list in `.github/workflows/poll.yml` — status of public
+  instances: https://status.d420.de/
+- GitHub disables scheduled workflows after ~60 days without repo activity;
+  push any commit (or re-enable in the Actions tab) to keep it alive.
+- Debug the Worker with `npx wrangler tail`; check the poller in the repo's
+  Actions tab.
