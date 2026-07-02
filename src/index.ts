@@ -223,6 +223,17 @@ async function handleUpdate(env: Env, update: any): Promise<void> {
 	const text: string = msg?.text ?? '';
 	if (!msg) return;
 
+	// Self-heal: any message from a group proves we're in it — register if missing
+	// (covers add-events that happened before the webhook was set up).
+	if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
+		const chats = await getChats(env);
+		if (!(String(msg.chat.id) in chats)) {
+			chats[String(msg.chat.id)] = msg.chat.title ?? '';
+			await saveChats(env, chats);
+			console.log(`Registered chat ${msg.chat.id} (${msg.chat.title}) from message`);
+		}
+	}
+
 	if (text.startsWith('/start') && msg.chat.type === 'private') {
 		await tg(env, 'sendMessage', {
 			chat_id: msg.chat.id,
@@ -264,6 +275,40 @@ export default {
 				allowed_updates: ['message', 'my_chat_member'],
 			});
 			return Response.json(result);
+		}
+
+		// Temporary: KV write/read self-test. Guarded by the webhook secret.
+		if (url.pathname === '/debug/kv') {
+			if (url.searchParams.get('key') !== (await webhookSecret(env))) {
+				return new Response('forbidden', { status: 403 });
+			}
+			try {
+				await env.STATE.put('kv_selftest', 'hello');
+				const back = await env.STATE.get('kv_selftest');
+				return Response.json({ wrote: true, readBack: back });
+			} catch (e) {
+				return Response.json({ error: String(e) });
+			}
+		}
+
+		// Temporary: probe feed sources from the Workers network. Guarded by the webhook secret.
+		if (url.pathname === '/debug/fetch') {
+			if (url.searchParams.get('key') !== (await webhookSecret(env))) {
+				return new Response('forbidden', { status: 403 });
+			}
+			const target = url.searchParams.get('url') ?? '';
+			try {
+				const res = await fetch(target, {
+					headers: {
+						'User-Agent': url.searchParams.get('ua') ?? USER_AGENT,
+						Accept: url.searchParams.get('accept') ?? '*/*',
+					},
+				});
+				const body = await res.text();
+				return Response.json({ status: res.status, length: body.length, head: body.slice(0, 400) });
+			} catch (e) {
+				return Response.json({ error: String(e) });
+			}
 		}
 
 		return new Response('neet-post-notifier is running');
