@@ -1,37 +1,43 @@
 name: poll-feed
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
+
+# One long-lived polling loop at a time; the cron just restarts it when it ends.
+# (GitHub fires frequent crons unreliably — hours late — so a 5-minute schedule
+# gives hour-plus latency. A ~5.5h loop polling internally every 2.5 minutes
+# doesn't depend on cron punctuality.)
+concurrency:
+  group: poll
+  cancel-in-progress: false
 
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 350
     steps:
-      - name: Fetch Nitter RSS and push to Worker
+      - name: Poll Nitter RSS and push to Worker
         env:
           INGEST_KEY: ${{ secrets.INGEST_KEY }}
         run: |
           set -u
-          FAILED=0
-          for handle in neet_sol; do
-            ok=0
-            for base in "https://nitter.net" "https://nitter.tiekoetter.com"; do
-              echo "trying $base for @$handle"
-              code=$(curl -s -m 20 -A "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0" \
-                -o feed.xml -w "%{http_code}" "$base/$handle/rss" || echo "000")
-              if [ "$code" = "200" ] && head -c 500 feed.xml | grep -q "<rss"; then
-                echo "got feed for @$handle from $base"
-                curl -s -m 30 -X POST "https://neet-post-notifier.pillgates777.workers.dev/ingest?handle=$handle" \
-                  -H "x-ingest-key: $INGEST_KEY" \
-                  --data-binary @feed.xml
-                echo
-                ok=1
-                break
-              fi
-              echo "$base failed (HTTP $code)"
+          END=$((SECONDS + 20100))  # ~5h35m, under the job timeout
+          while [ $SECONDS -lt $END ]; do
+            for handle in neet_sol; do
+              for base in "https://nitter.net" "https://nitter.tiekoetter.com"; do
+                code=$(curl -s -m 20 -A "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0" \
+                  -o feed.xml -w "%{http_code}" "$base/$handle/rss" || echo "000")
+                if [ "$code" = "200" ] && head -c 500 feed.xml | grep -q "<rss"; then
+                  resp=$(curl -s -m 30 -X POST "https://neet-post-notifier.pillgates777.workers.dev/ingest?handle=$handle" \
+                    -H "x-ingest-key: $INGEST_KEY" \
+                    --data-binary @feed.xml)
+                  echo "$(date -u +%H:%M:%S) @$handle via $base -> $resp"
+                  break
+                fi
+                echo "$(date -u +%H:%M:%S) @$handle $base failed (HTTP $code)"
+              done
             done
-            [ "$ok" = "1" ] || { echo "all instances failed for @$handle" >&2; FAILED=1; }
+            sleep 150
           done
-          exit $FAILED
+          echo "loop window over; next scheduled run takes over"
