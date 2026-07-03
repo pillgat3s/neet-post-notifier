@@ -3,6 +3,8 @@
 	"name": "neet-post-notifier",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-06-01",
+	// explicitly empty: deregisters the old cron trigger (feed polling happens in the GitHub Action)
+	"triggers": { "crons": [] },
 	"kv_namespaces": [
 		{ "binding": "STATE", "id": "9e70c1f0b6b4429da6df2071394c138c" }
 	],
