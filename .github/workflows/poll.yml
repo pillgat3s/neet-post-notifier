@@ -15,7 +15,7 @@ jobs:
         run: |
           set -u
           FAILED=0
-          for handle in neet_sol pillg4tes; do
+          for handle in neet_sol; do
             ok=0
             for base in "https://nitter.net" "https://nitter.tiekoetter.com"; do
               echo "trying $base for @$handle"
