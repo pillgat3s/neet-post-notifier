@@ -231,12 +231,23 @@ async function handleUpdate(env: Env, update: any): Promise<void> {
 			const cleaned = urls.map(cleanUrl).filter((u): u is string => u !== null);
 			if (cleaned.length) {
 				const who = msg.from?.username ? `@${msg.from.username}` : (msg.from?.first_name ?? '');
-				await tg(env, 'sendMessage', {
-					chat_id: msg.chat.id,
-					reply_parameters: { message_id: msg.message_id },
-					text: `${cleaned.join('\n')}\n\n${who} your link had tracking parameters — please remove them next time`,
-					link_preview_options: { is_disabled: true },
-				});
+				const tip = 'to remove them yourself, delete everything from the "?" onwards (e.g. ?s=20, ?utm_source=…)';
+				// Delete the dirty original and repost clean; needs the 'Delete messages'
+				// admin right — without it, fall back to replying under the original.
+				const deleted = await tg(env, 'deleteMessage', { chat_id: msg.chat.id, message_id: msg.message_id });
+				if (deleted.ok) {
+					await tg(env, 'sendMessage', {
+						chat_id: msg.chat.id,
+						text: `${cleaned.join('\n')}\n\n${who} your link had tracking parameters, deleted it and reposted clean — ${tip}`,
+					});
+				} else {
+					await tg(env, 'sendMessage', {
+						chat_id: msg.chat.id,
+						reply_parameters: { message_id: msg.message_id },
+						text: `${cleaned.join('\n')}\n\n${who} your link had tracking parameters — ${tip}`,
+						link_preview_options: { is_disabled: true },
+					});
+				}
 			}
 		}
 	}
