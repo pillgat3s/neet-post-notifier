@@ -12,7 +12,15 @@
  *
  * fetch() also serves the Telegram webhook (group add/remove, /start,
  * /status) and GET /init to (re)register the webhook after deploying.
+ *
+ * Link cleaning: when a group message contains URLs with tracking parameters
+ * (utm_*, fbclid, gclid, …) the bot replies with the cleaned links and asks
+ * the poster to strip them next time. Toggle per chat with /cleanlinks on|off.
+ * Requires the bot to be a group admin (or privacy mode disabled) so Telegram
+ * delivers non-command messages to it.
  */
+
+import { cleanUrl, extractUrls } from './cleanlinks';
 
 interface Env {
 	STATE: KVNamespace;
@@ -200,6 +208,36 @@ async function handleUpdate(env: Env, update: any): Promise<void> {
 			chats[String(msg.chat.id)] = msg.chat.title ?? '';
 			await saveChats(env, chats);
 			console.log(`Registered chat ${msg.chat.id} (${msg.chat.title}) from message`);
+		}
+	}
+
+	if (text.startsWith('/cleanlinks')) {
+		const arg = text.split(/\s+/)[1]?.toLowerCase();
+		const offKey = `cleanlinks_off:${msg.chat.id}`;
+		if (arg === 'on') await env.STATE.delete(offKey);
+		else if (arg === 'off') await env.STATE.put(offKey, '1');
+		const off = arg === 'off' || (arg !== 'on' && (await env.STATE.get(offKey)) !== null);
+		await tg(env, 'sendMessage', {
+			chat_id: msg.chat.id,
+			text: `Link cleaning is ${off ? 'off' : 'on'}${arg ? '' : ' — use /cleanlinks on|off'}`,
+		});
+		return;
+	}
+
+	// Link cleaning: reply with tracking-free versions of any dirty URLs.
+	if (!msg.from?.is_bot) {
+		const urls = extractUrls(msg);
+		if (urls.length && (await env.STATE.get(`cleanlinks_off:${msg.chat.id}`)) === null) {
+			const cleaned = urls.map(cleanUrl).filter((u): u is string => u !== null);
+			if (cleaned.length) {
+				const who = msg.from?.username ? `@${msg.from.username}` : (msg.from?.first_name ?? '');
+				await tg(env, 'sendMessage', {
+					chat_id: msg.chat.id,
+					reply_parameters: { message_id: msg.message_id },
+					text: `${cleaned.join('\n')}\n\n${who} your link had tracking parameters — please remove them next time`,
+					link_preview_options: { is_disabled: true },
+				});
+			}
 		}
 	}
 
